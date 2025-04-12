@@ -35,14 +35,14 @@ class CustomLSTM(LSTM):
 # -------------------------------
 # Load the model and label encoder
 # -------------------------------
-model_path = r"C:\Users\CITRA\Desktop\Naveen Gill\emotion_detection\best_model_new.h5"
-label_encoder_path = r"C:\Users\CITRA\Desktop\Naveen Gill\emotion_detection\label_encoder.npy"
+model_path = r"emotion_model.h5"
+label_encoder_path = r"label_encoder.npy"
 
 # model = tf.keras.models.load_model(model_path, custom_objects={"LSTM": custom_lstm})
 
 # model = tf.keras.models.load_model("emotion_model_updated.h5", custom_objects={"CustomLSTM": CustomLSTM})
 
-model = tf.keras.models.load_model("emotion_model_updated.h5", custom_objects={"LSTM": CustomLSTM})
+model = tf.keras.models.load_model("emotion_model.h5", custom_objects={"LSTM": CustomLSTM})
 
 
 
