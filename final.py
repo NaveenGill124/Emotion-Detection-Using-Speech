@@ -1,160 +1,114 @@
 import os
 import numpy as np
-import tensorflow as tf
 import librosa
+import tensorflow as tf
 import streamlit as st
-import matplotlib.pyplot as plt
-import json
 import requests
 from streamlit_lottie import st_lottie
-from tensorflow import keras
 
-# -------------------------------
-# Custom LSTM to fix model loading (if needed)
-# -------------------------------
-def custom_lstm(*args, **kwargs):
-    if 'time_major' in kwargs:
-        kwargs.pop('time_major')
-    return tf.keras.layers.LSTM(*args, **kwargs)
-
-import tensorflow as tf
-from tensorflow import keras
-
-from tensorflow.keras.utils import register_keras_serializable
-
-import tensorflow as tf
+# First things first: my model was trained with an LSTM layer, but while loading,
+# TensorFlow sometimes throws issues with extra arguments (like `time_major`).
+# To fix that, I made a custom LSTM class that just ignores that argument.
 from tensorflow.keras.layers import LSTM
 from tensorflow.keras.utils import register_keras_serializable
 
 @register_keras_serializable()
 class CustomLSTM(LSTM):
     def __init__(self, *args, **kwargs):
-        kwargs.pop('time_major', None)  # Remove unsupported argument if present
-        super(CustomLSTM, self).__init__(*args, **kwargs)
+        kwargs.pop('time_major', None)  # just removing the problematic arg
+        super().__init__(*args, **kwargs)
 
-# -------------------------------
-# Load the model and label encoder
-# -------------------------------
-model_path = r"emotion_model.h5"
-label_encoder_path = r"label_encoder.npy"
+# Loading the trained model and the label encoder (which maps numbers → emotions).
+# I saved them earlier when training the emotion recognition model.
+MODEL_PATH = "emotion_model.h5"
+ENCODER_PATH = "label_encoder.npy"
 
-# model = tf.keras.models.load_model(model_path, custom_objects={"LSTM": custom_lstm})
+model = tf.keras.models.load_model(MODEL_PATH, custom_objects={"LSTM": CustomLSTM})
+label_encoder = np.load(ENCODER_PATH, allow_pickle=True)
 
-# model = tf.keras.models.load_model("emotion_model_updated.h5", custom_objects={"CustomLSTM": CustomLSTM})
-
-model = tf.keras.models.load_model("emotion_model.h5", custom_objects={"LSTM": CustomLSTM})
-
-
-
-le = np.load(label_encoder_path, allow_pickle=True)
-
-# -------------------------------
-# Define movie recommendations for each emotion (3 per emotion)
-# -------------------------------
+# I wanted this app to be fun, so for every detected emotion I prepared a short
+# list of movies that go well with that mood.
 MOVIE_DB = {
-    'angry': ['Mad Max: Fury Road', 'John Wick', 'Gladiator'],
-    #'calm': ['The Secret Life of Walter Mitty', 'Lost in Translation', 'The Grand Budapest Hotel'],
-    'disgust': ['Requiem for a Dream', 'Trainspotting', 'American Beauty'],
-    'fearful': ['The Conjuring', 'Insidious', 'The Babadook'],
-    'happy': ['The Intouchables', 'Amélie', 'La La Land'],
-    'neutral': ['Inception', 'The Social Network', 'Interstellar'],
-    'sad': ['Manchester by the Sea', 'A Star is Born', 'The Notebook'],
-    #'surprised': ['The Prestige', 'Memento', 'Shutter Island']
+    "angry": ["Mad Max: Fury Road", "John Wick", "Gladiator"],
+    "disgust": ["Requiem for a Dream", "Trainspotting", "American Beauty"],
+    "fearful": ["The Conjuring", "Insidious", "The Babadook"],
+    "happy": ["The Intouchables", "Amélie", "La La Land"],
+    "neutral": ["Inception", "The Social Network", "Interstellar"],
+    "sad": ["Manchester by the Sea", "A Star is Born", "The Notebook"]
 }
 
-# -------------------------------
-# Function to process audio: extract MFCC features and prepare input for model
-# -------------------------------
-def process_audio(file_path):
+# Audio can be messy, so here I’m extracting MFCC (Mel Frequency Cepstral Coefficients).
+# Basically, it converts raw audio into numbers that represent features like tone/pitch.
+# I also make sure the shape is fixed (130 time steps), otherwise the model won’t accept it.
+def extract_features(file_path):
     audio, sr = librosa.load(file_path, sr=22050)
-    mfccs = librosa.feature.mfcc(y=audio, sr=sr, n_mfcc=40)
-    # Pad or truncate MFCCs to fixed length (130 time steps)
-    if mfccs.shape[1] < 130:
-        mfccs = np.pad(mfccs, ((0, 0), (0, 130 - mfccs.shape[1])), mode='constant')
+    mfcc = librosa.feature.mfcc(y=audio, sr=sr, n_mfcc=40)
+
+    if mfcc.shape[1] < 130:
+        mfcc = np.pad(mfcc, ((0, 0), (0, 130 - mfcc.shape[1])), mode="constant")
     else:
-        mfccs = mfccs[:, :130]
-    # Transpose so that shape is (time_steps, n_mfcc) and add a batch dimension
-    return mfccs.T[np.newaxis, ...]
+        mfcc = mfcc[:, :130]
 
-# -------------------------------
-# Streamlit App UI
-# -------------------------------
+    return mfcc.T[np.newaxis, ...]
+
+# Now the Streamlit UI part (the fun part!).
+# Setting up the page and adding a title.
 st.set_page_config(page_title="Speech Emotion Recognition", layout="wide")
-st.title("Speech Emotion Recognition & Movie Recommendation 🎤🍿")
-st.markdown(
-    """
-    Welcome! Upload or record an audio file, and our model will detect your emotion 
-    and recommend movies accordingly.
-    """
-)
+st.title("🎤 Emotion Detection + Movie Recs 🍿")
 
-tab1, tab2 = st.tabs(["📁 Upload Audio", "🎙️ Record Audio"])
-# audio_file = st.audio_input("Record a voice message")
+st.markdown("Upload or record your voice, and I’ll guess your mood + suggest movies!")
 
-with tab1:
-    # Use Streamlit's file uploader for an audio file
-    audio_file = st.file_uploader("Upload an audio file (WAV format)", type=["wav"])
+# I’ve made two tabs: one for uploading an existing file, and one for directly recording audio.
+tab_upload, tab_record = st.tabs(["📁 Upload Audio", "🎙️ Record Audio"])
 
-with tab2:
-    # If you use a recorder component or any plugin, you can integrate it here
-    audio_file = st.audio_input("Record a voice message")
+with tab_upload:
+    uploaded_audio = st.file_uploader("Upload a WAV file", type=["wav"])
 
-if audio_file:
-    # Save the uploaded file to a temporary location
-    temp_audio_path = "temp.wav"
-    with open(temp_audio_path, "wb") as f:
-        f.write(audio_file.read())
-    
-    # Optionally, display the audio player
-    st.audio(temp_audio_path)
-    
-    # Process the audio to get MFCC features
-    mfcc_input = process_audio(temp_audio_path)
-    
-    # Predict emotion from the processed audio
-    pred = model.predict(mfcc_input)
-    predicted_emotion = le[np.argmax(pred)]
+with tab_record:
+    uploaded_audio = st.audio_input("Record your voice here")
 
-    # Remap 'calm' to 'neutral'
-    if predicted_emotion == "calm":
-        predicted_emotion = "neutral"
-    
-    # Display a fun animation above the result (optional)
-    # Grab a Lottie animation from a URL
-    url_anim_before = requests.get("https://assets2.lottiefiles.com/packages/lf20_q8mzv4.json")  # example
-    if url_anim_before.status_code == 200:
-        anim_before_json = url_anim_before.json()
-        st_lottie(anim_before_json, height=200)
-    
-    # Display the detected emotion in a more conversational style
-    st.markdown(
-        f"### I think you are feeling **{predicted_emotion.capitalize()}** right now!"
-    )
-    st.markdown(
-        "No worries—I've got your back. "
-        "Here are some movie suggestions that might lift your mood. "
-        "Watch them and thank me later! 😉"
-    )
-    
-    # Retrieve the list of movies for the detected emotion
-    recommendations = MOVIE_DB.get(predicted_emotion, [])
-    
-    # Use Streamlit columns to display recommendations nicely
+# Once I have the audio, I save it temporarily so librosa can process it.
+if uploaded_audio:
+    temp_file = "temp.wav"
+    with open(temp_file, "wb") as f:
+        f.write(uploaded_audio.read())
+
+    # This lets the user actually play back the file they just uploaded/recorded.
+    st.audio(temp_file)
+
+    # Extract MFCC features and run it through the model.
+    features = extract_features(temp_file)
+    prediction = model.predict(features)
+    detected_emotion = label_encoder[np.argmax(prediction)]
+
+    # Some datasets mark "calm" separately, but I merged it with "neutral".
+    if detected_emotion == "calm":
+        detected_emotion = "neutral"
+
+    # A little animation before showing results (makes the app feel alive).
+    anim1 = requests.get("https://assets2.lottiefiles.com/packages/lf20_q8mzv4.json")
+    if anim1.status_code == 200:
+        st_lottie(anim1.json(), height=200)
+
+    # Show the detected emotion in a friendly style.
+    st.subheader(f"You sound **{detected_emotion.capitalize()}** 🎧")
+    st.write("Here are some movies you might enjoy:")
+
+    # Display movie recommendations nicely in 3 columns.
+    recs = MOVIE_DB.get(detected_emotion, [])
     cols = st.columns(3)
-    for i, movie in enumerate(recommendations):
-        cols[i % 3].markdown(f"- 🎬 **{movie}**")
-    
-    # Optionally, display another animation after the recommendations
-    url_anim_after = requests.get("https://assets8.lottiefiles.com/packages/lf20_2sz3v2sf.json")  # example
-    if url_anim_after.status_code == 200:
-        anim_after_json = url_anim_after.json()
-        st_lottie(anim_after_json, height=200)
+    for i, m in enumerate(recs):
+        cols[i % 3].markdown(f"- 🎬 **{m}**")
 
-    # Clean up the temporary file
-    os.remove(temp_audio_path)
+    # Another animation after showing movies.
+    anim2 = requests.get("https://assets8.lottiefiles.com/packages/lf20_2sz3v2sf.json")
+    if anim2.status_code == 200:
+        st_lottie(anim2.json(), height=200)
 
-# Display a final Lottie animation or any other decorative element at the bottom
-url1 = requests.get("https://lottie.host/74af8bbc-2a50-4f1b-a8bd-beb53239bd92/vzcZEXtLSc.json")
-if url1.status_code == 200:
-    url_json1 = url1.json()
-    st_lottie(url_json1)
+    # Clean up the temporary file.
+    os.remove(temp_file)
+
+# And finally, I added one last animation at the bottom as a finishing touch.
+final_anim = requests.get("https://lottie.host/74af8bbc-2a50-4f1b-a8bd-beb53239bd92/vzcZEXtLSc.json")
+if final_anim.status_code == 200:
+    st_lottie(final_anim.json())
